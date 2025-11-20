@@ -1,8 +1,9 @@
 """
 API Service - Hệ thống AI Đọc Báo Cáo & Vẽ Biểu Đồ
-VTC NETVIET
+VTC NETVIET - FULL VERSION WITH SMART CHART GENERATOR
 
-Chạy server: uvicorn api_service:app --host 0.0.0.0 --port 8502 --reload
+Chạy server: python api_service.py
+Hoặc: uvicorn api_service:app --host 0.0.0.0 --port 8502 --reload
 Truy cập docs: http://localhost:8502/docs
 """
 
@@ -10,11 +11,12 @@ import os
 import base64
 import json
 import io
+import zipfile
 from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query, Body
 from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -28,10 +30,13 @@ from openai import OpenAI
 import PyPDF2
 from PIL import Image
 
+# Import Smart Chart Generator
+from smart_chart_generator import SmartChartGenerator, integrate_smart_chart_to_api
+
 # Cấu hình
 os.environ["OPENAI_API_KEY"] = os.getenv(
     "OPENAI_API_KEY",
-    ""
+    ""  # Thay bằng key của bạn hoặc set environment variable
 )
 client = OpenAI()
 
@@ -39,7 +44,7 @@ client = OpenAI()
 app = FastAPI(
     title="API Hệ thống AI Đọc Báo Cáo - VTC NETVIET",
     description="API để phân tích báo cáo, vẽ biểu đồ và trích xuất thông tin từ tài liệu",
-    version="1.0.0",
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -254,6 +259,16 @@ async def root():
                 font-size: 1.2em;
                 margin-bottom: 40px;
             }
+            .version {
+                text-align: center;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 10px;
+                border-radius: 20px;
+                display: inline-block;
+                margin: 0 auto 30px auto;
+                font-weight: bold;
+            }
             .feature-grid {
                 display: grid;
                 grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -274,6 +289,10 @@ async def root():
             .feature-card ul {
                 margin: 15px 0;
                 padding-left: 20px;
+            }
+            .feature-card.new {
+                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                border: 3px solid #FFD700;
             }
             .button-group {
                 display: flex;
@@ -319,6 +338,10 @@ async def root():
                 border-radius: 8px;
                 border-left: 4px solid #667eea;
             }
+            .endpoint.new {
+                border-left: 4px solid #f5576c;
+                background: #fff5f7;
+            }
             .method {
                 display: inline-block;
                 padding: 3px 8px;
@@ -329,14 +352,36 @@ async def root():
             }
             .method-get { background: #48bb78; color: white; }
             .method-post { background: #4299e1; color: white; }
+            .badge {
+                background: #FFD700;
+                color: #333;
+                padding: 2px 8px;
+                border-radius: 4px;
+                font-size: 0.75em;
+                font-weight: bold;
+                margin-left: 10px;
+            }
         </style>
     </head>
     <body>
         <div class="container">
             <h1>🚀 API AI Đọc Báo Cáo</h1>
             <div class="subtitle">VTC NETVIET - Hệ thống phân tích báo cáo thông minh</div>
+            <div style="text-align: center;">
+                <span class="version">⚡ Version 2.0 - Smart Chart Generator</span>
+            </div>
             
             <div class="feature-grid">
+                <div class="feature-card new">
+                    <h3>🆕 Smart Chart Generator</h3>
+                    <ul>
+                        <li>Tự động trích xuất dữ liệu số</li>
+                        <li>AI đề xuất biểu đồ phù hợp</li>
+                        <li>Tạo nhiều biểu đồ cùng lúc</li>
+                        <li>Xuất PNG hoặc ZIP</li>
+                    </ul>
+                </div>
+                
                 <div class="feature-card">
                     <h3>📊 Vẽ Biểu Đồ Nâng Cao</h3>
                     <ul>
@@ -370,6 +415,24 @@ async def root():
             
             <div class="endpoint-list">
                 <h3>📡 API Endpoints</h3>
+                
+                <div class="endpoint new">
+                    <span class="method method-post">POST</span>
+                    <strong>/api/pipeline/full</strong> - Pipeline hoàn chỉnh + Smart Charts
+                    <span class="badge">NEW</span>
+                </div>
+                
+                <div class="endpoint new">
+                    <span class="method method-post">POST</span>
+                    <strong>/api/chart/render</strong> - Vẽ biểu đồ từ config
+                    <span class="badge">NEW</span>
+                </div>
+                
+                <div class="endpoint new">
+                    <span class="method method-post">POST</span>
+                    <strong>/api/chart/render-all</strong> - Vẽ tất cả biểu đồ (ZIP)
+                    <span class="badge">NEW</span>
+                </div>
                 
                 <div class="endpoint">
                     <span class="method method-post">POST</span>
@@ -424,7 +487,13 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "AI Report Reader API",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "features": {
+            "smart_chart_generator": True,
+            "ocr": True,
+            "pdf_analysis": True,
+            "multi_chart_export": True
+        },
         "timestamp": datetime.now().isoformat()
     }
 
@@ -722,32 +791,42 @@ Phân tích:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ==================== SMART CHART ENDPOINTS ====================
+
 @app.post("/api/pipeline/full")
 async def full_pipeline(
     pdf_file: Optional[UploadFile] = File(None),
     image_files: List[UploadFile] = File(default=[]),
     text_content: Optional[str] = Form(None),
-    output_format: str = Form("detailed")
+    output_format: str = Form("detailed"),
+    create_charts: bool = Form(True)
 ):
     """
-    Pipeline xử lý hoàn chỉnh: PDF + Images + Text -> Analysis
+    Pipeline xử lý hoàn chỉnh: PDF + Images + Text -> Analysis + Smart Charts
 
     - **pdf_file**: File PDF (optional)
     - **image_files**: Danh sách file ảnh (optional)
-    - **text_content**: Nội dung text (optional)
+    - **text_content**: Nội dung text hoặc yêu cầu (optional)
     - **output_format**: summary, detailed, insights, json
+    - **create_charts**: True = tự động tạo biểu đồ, False = chỉ phân tích
     """
     try:
         results = {
             "input_summary": {},
             "ocr_results": {},
             "analysis": {},
+            "charts": {},
+            "statistics": {},
             "timestamp": datetime.now().isoformat()
         }
 
         combined_text = text_content or ""
 
+        # Token counter
+        total_tokens = 0
+
         # 1. Xử lý PDF
+        pdf_text = ""
         if pdf_file:
             pdf_content = await pdf_file.read()
             pdf_text = extract_text_from_pdf(io.BytesIO(pdf_content))
@@ -778,6 +857,8 @@ async def full_pipeline(
                 )
 
                 img_analysis = response.choices[0].message.content
+                total_tokens += response.usage.total_tokens
+
                 results["ocr_results"]["images"].append({
                     "filename": img_file.filename,
                     "analysis": img_analysis
@@ -785,26 +866,188 @@ async def full_pipeline(
 
                 combined_text += f"\n\n=== Từ ảnh: {img_file.filename} ===\n{img_analysis}"
 
-        # 3. Phân tích tổng hợp
+        # 3. ==================== SMART CHART GENERATION ====================
+        if create_charts and pdf_text:
+            print("🎨 Đang tạo biểu đồ thông minh...")
+
+            try:
+                chart_result = integrate_smart_chart_to_api(
+                    pdf_text=pdf_text,
+                    user_request=text_content
+                )
+
+                if chart_result.get("chart_configs"):
+                    results["charts"]["available"] = True
+                    results["charts"]["count"] = len(chart_result["chart_configs"])
+                    results["charts"]["configs"] = chart_result["chart_configs"]
+
+                    # Thêm extracted data nếu có
+                    if chart_result.get("extracted_data"):
+                        results["charts"]["extracted_data"] = chart_result["extracted_data"]
+
+                    # Thêm recommended charts nếu có
+                    if chart_result.get("recommended_charts"):
+                        results["charts"]["recommendations"] = chart_result["recommended_charts"]
+
+                    print(f"✅ Đã tạo {len(chart_result['chart_configs'])} biểu đồ")
+                else:
+                    results["charts"]["available"] = False
+                    results["charts"]["message"] = "Không thể trích xuất dữ liệu biểu đồ từ báo cáo"
+
+            except Exception as e:
+                results["charts"]["available"] = False
+                results["charts"]["error"] = str(e)
+                print(f"⚠️  Lỗi tạo biểu đồ: {e}")
+
+        # 4. Phân tích tổng hợp
         if combined_text.strip():
             prompts_map = {
-                "summary": "Tóm tắt Executive Summary",
-                "detailed": "Phân tích chi tiết toàn diện",
-                "insights": "Phát hiện insights và khuyến nghị",
-                "json": "Trích xuất dữ liệu có cấu trúc JSON"
+                "summary": "Tóm tắt Executive Summary ngắn gọn với các điểm chính",
+                "detailed": "Phân tích chi tiết toàn diện báo cáo tài chính",
+                "insights": "Phát hiện insights quan trọng và đưa ra khuyến nghị chiến lược",
+                "json": "Trích xuất dữ liệu có cấu trúc JSON với các chỉ số quan trọng"
             }
 
-            analysis_result = analyze_with_openai(
-                f"{prompts_map.get(output_format, prompts_map['detailed'])}\n\nNỘI DUNG:\n{combined_text}",
-                "Bạn là chuyên gia phân tích báo cáo của VTC NETVIET."
+            analysis_prompt = f"{prompts_map.get(output_format, prompts_map['detailed'])}\n\nNỘI DUNG:\n{combined_text}"
+
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "Bạn là chuyên gia phân tích báo cáo tài chính của VTC NETVIET."},
+                    {"role": "user", "content": analysis_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=3000
             )
+
+            analysis_result = response.choices[0].message.content
+            total_tokens += response.usage.total_tokens
 
             results["analysis"] = {
                 "output_format": output_format,
                 "result": analysis_result
             }
 
+        # 5. Statistics
+        results["statistics"] = {
+            "total_tokens_used": total_tokens,
+            "pdf_processed": pdf_file is not None,
+            "images_processed": len(image_files) if image_files else 0,
+            "charts_created": results["charts"].get("count", 0) if create_charts else 0,
+            "output_format": output_format
+        }
+
         return results
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/chart/render")
+async def render_chart_from_config(
+    chart_config: Dict[str, Any] = Body(...),
+    style: str = Body("seaborn")
+):
+    """
+    Vẽ biểu đồ từ config đã tạo bởi Smart Chart Generator
+
+    **Input:** Chart config từ /api/pipeline/full
+
+    **Output:** File PNG biểu đồ
+    """
+    try:
+        buffer = create_chart(
+            data=chart_config["data"],
+            chart_type=chart_config["chart_type"],
+            title=chart_config["title"],
+            xlabel=chart_config.get("xlabel"),
+            ylabel=chart_config.get("ylabel"),
+            style=style
+        )
+
+        return StreamingResponse(
+            buffer,
+            media_type="image/png",
+            headers={
+                "Content-Disposition": f"attachment; filename={chart_config['title'].replace(' ', '_')}.png",
+                "X-Chart-Title": chart_config['title']
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/chart/render-all")
+async def render_all_charts(
+    chart_configs: List[Dict[str, Any]] = Body(...),
+    output_format: str = Body("zip", description="zip hoặc individual")
+):
+    """
+    Vẽ tất cả biểu đồ từ danh sách configs
+
+    **Output:**
+    - zip: File ZIP chứa tất cả biểu đồ
+    - individual: Trả về danh sách base64 images
+    """
+    try:
+        if output_format == "zip":
+            # Tạo ZIP file
+            zip_buffer = io.BytesIO()
+
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                for i, config in enumerate(chart_configs, 1):
+                    # Tạo biểu đồ
+                    chart_buffer = create_chart(
+                        data=config["data"],
+                        chart_type=config["chart_type"],
+                        title=config["title"],
+                        xlabel=config.get("xlabel"),
+                        ylabel=config.get("ylabel"),
+                        style="seaborn"
+                    )
+
+                    # Thêm vào ZIP
+                    filename = f"{i}_{config['title'].replace(' ', '_')}.png"
+                    zip_file.writestr(filename, chart_buffer.getvalue())
+
+            zip_buffer.seek(0)
+
+            return StreamingResponse(
+                zip_buffer,
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": f"attachment; filename=charts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                }
+            )
+
+        else:  # individual
+            results = []
+
+            for config in chart_configs:
+                chart_buffer = create_chart(
+                    data=config["data"],
+                    chart_type=config["chart_type"],
+                    title=config["title"],
+                    xlabel=config.get("xlabel"),
+                    ylabel=config.get("ylabel"),
+                    style="seaborn"
+                )
+
+                # Convert to base64
+                base64_image = base64.b64encode(chart_buffer.getvalue()).decode('utf-8')
+
+                results.append({
+                    "title": config["title"],
+                    "chart_type": config["chart_type"],
+                    "image_base64": base64_image
+                })
+
+            return {
+                "success": True,
+                "count": len(results),
+                "charts": results
+            }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -911,6 +1154,16 @@ async def analysis_examples():
                 "Tạo biểu đồ tròn thị phần: VTC 35%, Đối thủ A 25%, Khác 40%",
                 "Vẽ đường xu hướng tăng trưởng từ 2020-2024: 50, 65, 80, 95, 110 tỷ"
             ]
+        },
+        "smart_chart_generator": {
+            "endpoint": "POST /api/pipeline/full",
+            "description": "Tự động trích xuất dữ liệu và tạo nhiều biểu đồ",
+            "parameters": {
+                "pdf_file": "File PDF báo cáo",
+                "text_content": "Yêu cầu tạo biểu đồ",
+                "create_charts": "true/false",
+                "output_format": "summary/detailed/insights"
+            }
         }
     }
 
@@ -920,24 +1173,31 @@ async def analysis_examples():
 if __name__ == "__main__":
     import uvicorn
 
-    print("=" * 70)
-    print("🚀 STARTING API SERVER - AI ĐỌC BÁO CÁO VTC NETVIET")
-    print("=" * 70)
+    print("=" * 80)
+    print("🚀 STARTING API SERVER - AI ĐỌC BÁO CÁO VTC NETVIET v2.0")
+    print("=" * 80)
     print("\n📡 Server Information:")
     print(f"   - Host: http://localhost:8502")
     print(f"   - API Docs: http://localhost:8502/docs")
     print(f"   - ReDoc: http://localhost:8502/redoc")
     print(f"   - Homepage: http://localhost:8502/")
+    print("\n🆕 New Features:")
+    print("   - ⚡ Smart Chart Generator")
+    print("   - 📊 Auto extract data from financial reports")
+    print("   - 🎨 Generate multiple charts automatically")
+    print("   - 📦 Export charts as PNG or ZIP")
     print("\n🔧 Available Endpoints:")
+    print("   - POST /api/pipeline/full - Pipeline hoàn chỉnh + Smart Charts")
+    print("   - POST /api/chart/render - Vẽ biểu đồ từ config")
+    print("   - POST /api/chart/render-all - Vẽ tất cả biểu đồ (ZIP)")
     print("   - POST /api/analyze/text - Phân tích văn bản")
     print("   - POST /api/analyze/image - Phân tích ảnh/biểu đồ")
     print("   - POST /api/analyze/pdf - Phân tích PDF")
     print("   - POST /api/chart/create - Vẽ biểu đồ từ dữ liệu")
     print("   - POST /api/chart/smart - Tạo biểu đồ từ mô tả")
     print("   - POST /api/reports/compare - So sánh báo cáo")
-    print("   - POST /api/pipeline/full - Pipeline hoàn chỉnh")
     print("   - GET /api/demo/chart-examples - Ví dụ biểu đồ")
-    print("=" * 70)
+    print("=" * 80)
     print("\n⚙️  Starting server...\n")
 
     uvicorn.run(
